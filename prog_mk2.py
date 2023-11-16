@@ -30,8 +30,7 @@ class Prog:
            # self.print_hex_struct()
            self.send_hex_to_device(page_size=page_size)
            if release_reset:
-               pass
-               self._utils.enable_programming(True)
+               self._utils.enable_programming(False)
 
 
     def send_hex_to_device(self, page_size):
@@ -198,5 +197,5 @@ class Prog:
                        all_match = False
                line_num += 1
                data_line = fp.readline()
-
+       self._utils.enable_programming(False)
        return all_match
