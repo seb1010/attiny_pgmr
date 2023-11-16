@@ -1,6 +1,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay_basic.h>
+
 #include "attiny_programmer_mk2/defs.h"
 
 
@@ -17,94 +18,104 @@
 
 #define DEVICE_ID 0x00
 #define DEVICE_TYPE 0x00
-#define BAUD_RATE 9600
 #define CLK_FREQ 8000000UL
-#define MAX_PACKET_LEN 66 // 64 + pid + checksum
 
-
-//#include "utils/packet_util.c"
-//#include "utils/seb_print_v2.c"
 
 uint8_t input_buffer[MAX_PACKET_LEN];
 uint8_t output_buffer[MAX_PACKET_LEN];
 uint8_t input_offset = 0;
 
-#include "utils/uart_500k.c"
+#include "attiny_programmer_mk2/uart_500k.c"
 #include "utils/seb_print_v3.c"
-#include "attiny_programmer_mk2/gpio_decode.c"
-
-//void send_one_uart_byte(uint8_t);
-//uint8_t wait_and_read_packet();
-//uint8_t check_sum(uint8_t*, uint8_t);
-//void send_uart_packet();
 
 struct pgmr_config{
   uint8_t spi_per;
   uint8_t and_read_spi;
+  uint8_t prog_enabled;
 };
 
 uint8_t read_write_spi_byte(uint8_t, uint8_t);
 void pass_input_to_spi(uint8_t spi_per);
-uint8_t config_pgmr(struct pgmr_config *pgc);
-uint8_t config_dut(struct pgmr_config *dut_phy);
+int8_t config_pgmr(struct pgmr_config *pgc);
+int8_t config_dut(struct pgmr_config *dut_phy);
+int8_t get_pgmr_status(struct pgmr_config *pcg);
+int8_t get_gpio_info(uint8_t, volatile uint8_t**,
+                     volatile uint8_t**, volatile uint8_t*);
 
 int main (){
   // configure io
-  DDRA = (1 << UART_TX)      |
-         (1 << SPI_MOSI_PIN) |
-         (1 << RESET_PIN)    |
-         (1 << SPI_SCLK_PIN);  // bus contention
-  PORTA |= (1 << UART_TX);
-  DDRB |= (1 << GPIO_2);
+  // starts with programming disabled
+  PORTA = (1 << UART_TX) | (1 << RESET_PIN);
+  DDRA = (1 << UART_TX) | (1 << RESET_PIN);
 
-//  configure_uart();
- 
-  uint32_t i;
-  uint8_t ret;
-  uint8_t packet_bad;
-  uint8_t instr_fail;
+
+  int8_t packet_bad;
+  int8_t instr_fail;
+  uint8_t send_ack;
+  uint8_t bad_checksums = 0;
 
   struct pgmr_config pgmr_phy;
   pgmr_phy.spi_per = 10;
   pgmr_phy.and_read_spi = 1;
+  pgmr_phy.prog_enabled = 0;
 
   while(1){
+      // reading with no timeout
       packet_bad = wait_and_read_packet(0);
      
-      //seb_print_v3("byte0: %x", (uint32_t)(*input_buffer));
-
-     //seb_print_v3("readin ", 0); 
-     //for(i=0; i<MAX_PACKET_LEN; i++)
-     //     *(output_buffer + i) = *(input_buffer + i);
-     //send_uart_packet();
-
       // if checksum looks good lets decode
+      send_ack = 1;
       if(!packet_bad){
+        bad_checksums = 0;
         switch( *(input_buffer + 1)){
           case DATA_PID: // data packet to passthrough
-            pass_input_to_spi(pgmr_phy.spi_per);
-            if(pgmr_phy.and_read_spi);
-              // send some packet
-            send_one_uart_byte(ACK_PID);
+            if(pgmr_phy.and_read_spi){
+              send_one_uart_byte(ACK_PID);
+              pass_input_to_spi(pgmr_phy.spi_per);
+              *(output_buffer + (*output_buffer) - 1) =
+                  check_sum(output_buffer, (*output_buffer) - 1);
+              send_uart_packet();
+              send_ack = 0;
+            }else{
+              pass_input_to_spi(pgmr_phy.spi_per);
+            }
             break;
           case CONFIG_PGMR_PID: // configure pgmr
             instr_fail = config_pgmr(&pgmr_phy);
-            seb_print_v3("c pgmr det", 0);
             break;
           case CONFIG_DUT_PID: // configure dut
             instr_fail = config_dut(&pgmr_phy);
             break;
+          case GET_PGMR_STATUS_PID: // configure dut
+            send_one_uart_byte(ACK_PID);
+            send_ack = 0;
+            instr_fail = get_pgmr_status(&pgmr_phy);
+            break;
+          case ACK_PID: // debugging only?
+              send_ack = 0;
+              instr_fail = 0;
+              break;
           default:
             seb_print_v3("err %d", (uint32_t)(*(input_buffer + 1)));
         }
         if(instr_fail)
             send_one_uart_byte(NAK_PID);
-        else
+        else if (send_ack)
             send_one_uart_byte(ACK_PID);
 
       }else{
-        send_one_uart_byte(NAK_PID);
-        seb_print_v3("bad pa co %x", (uint32_t)packet_bad);
+        // if here bad checksum
+        bad_checksums++;
+        if (bad_checksums < 2){
+          send_one_uart_byte(NAK_PID);
+        }else{
+          // if multiple checksum errors we likely have a sync issue
+          // in order to resync we run read_packet with a timeout
+          // and we just keep running that until we get a good packet
+          while (packet_bad){
+            packet_bad = wait_and_read_packet(200);
+          }
+        }
       }
 
     }
@@ -112,8 +123,8 @@ int main (){
   return 0;
 }
 
-uint8_t config_pgmr(struct pgmr_config *pgc){
-  uint8_t decode_fail = 0;
+int8_t config_pgmr(struct pgmr_config *pgc){
+  int8_t decode_fail = 0;
   switch (*(input_buffer + 2)){
     case SET_SPI_RATE_PID: // set spi rate
       (*pgc).spi_per = *(input_buffer + 3);
@@ -124,38 +135,76 @@ uint8_t config_pgmr(struct pgmr_config *pgc){
     default:
       decode_fail = 1;
   }
-  seb_print_v3("spi_p: %d", (uint32_t)((*pgc).spi_per));
   return decode_fail;
 }
 
+int8_t get_pgmr_status(struct pgmr_config *pgc){
+  *output_buffer = 0x06;
+  *(output_buffer + 1) = DATA_PID;
+  *(output_buffer + 2) = (*pgc).spi_per;
+  *(output_buffer + 3) = (*pgc).and_read_spi;
+  *(output_buffer + 4) = (*pgc).prog_enabled;
+  *(output_buffer + 5) = check_sum(output_buffer, (*output_buffer) - 1);
 
-int8_t enable_programming(uint8_t spi_per){
+  send_uart_packet();
+  return 0; // eventually send assured packet
+}
+
+
+int8_t enable_programming(struct pgmr_config *pgc){
   int8_t ret;
+  uint8_t spi_per = (*pgc).spi_per;
 
-  PORTA &= ~((1 << RESET_PIN) | (1 << SPI_MOSI_PIN) | (1 << SPI_SCLK_PIN));
-  _delay_loop_2(0xFFFF);
-  PORTA |= (1 << RESET_PIN);
-  _delay_loop_2(0xFFFF);
-  PORTA &= ~(1 << RESET_PIN);
-  _delay_loop_2(0xFFFF);
-  *input_buffer = 7;
-  *(input_buffer + 2) = 0xac;
-  *(input_buffer + 3) = 0x53;
-  *(input_buffer + 4) = 0x00;
-  *(input_buffer + 5) = 0x00;
+  // len pid_config_pgmr enable_proig, true/false
+  if(*(input_buffer + 3)){
+    // pins to dut to output and correct state
+    DDRA |= (1 << SPI_MOSI_PIN) | (1 << SPI_SCLK_PIN);
+    PORTA &= ~((1 << RESET_PIN) | (1 << SPI_MOSI_PIN) | (1 << SPI_SCLK_PIN));
 
-  pass_input_to_spi(spi_per);
+    // send reset pulse
+    _delay_loop_2(0xFFFF);
+    PORTA |= (1 << RESET_PIN);
+    _delay_loop_2(0xFFFF);
+    PORTA &= ~(1 << RESET_PIN);
+    _delay_loop_2(0xFFFF);
 
-  if(*(output_buffer + 4) == 0x53)
+    // send programming enable command
+    *input_buffer = 7;
+    *(input_buffer + 2) = 0xac;
+    *(input_buffer + 3) = 0x53;
+    *(input_buffer + 4) = 0x00;
+    *(input_buffer + 5) = 0x00;
+    pass_input_to_spi(spi_per);
+  
+    // check if programming was enabled successfully
+    if(*(output_buffer + 4) == 0x53){
+      ret = 0;
+
+      //update programer status
+      (*pgc).prog_enabled = 0x01;
+    }else{
+      ret = OPERATION_FAILED_PID;
+
+      // make sure sure everyone knows prog is not enabled
+      (*pgc).prog_enabled = 0x00;
+
+      // set the pgmr config to match not enabled
+      DDRA &= ~((1 << SPI_MOSI_PIN) | (1 << SPI_SCLK_PIN));
+      PORTA |= (1 << RESET_PIN);
+    }
+  }else{
+    DDRA &= ~((1 << SPI_MOSI_PIN) | (1 << SPI_SCLK_PIN));
+    PORTA |= (1 << RESET_PIN);
+
+    // update the pgmr status
+    (*pgc).prog_enabled = 0x00;
     ret = 0;
-  else
-    ret = OPERATION_FAILED_PID;
-
+  }
   return ret;
 }
 
 //len, conf_dut, specific conf, gpio num, gpio val
-uint8_t config_dut(struct pgmr_config *pgmr_phy){
+int8_t config_dut(struct pgmr_config *pgmr_phy){
   int8_t decode_fail = 0;
   uint8_t gpio_pin;
   volatile uint8_t* gpio_port;
@@ -173,7 +222,7 @@ uint8_t config_dut(struct pgmr_config *pgmr_phy){
           &port, &gpio_ddr, &gpio_pin);
       break;
     case ENABLE_PROGRAMMING_PID:
-      decode_fail = enable_programming((*pgmr_phy).spi_per);
+      decode_fail = enable_programming(pgmr_phy);
       break;
     default:
       decode_fail = 1;
@@ -211,9 +260,6 @@ uint8_t read_write_spi_byte(uint8_t data, uint8_t per_delay){
 
     // for (i=0; i<8; i++)
     "spi_bit_loop: \n\t"
-      "cpi %[bit_num], %[num_bits] \n\t"
-      "inc %[bit_num] \n\t"
-      "brcc end_spi_bit_loop \n\t"
 
 
       // set clock low set MOSI
@@ -222,6 +268,11 @@ uint8_t read_write_spi_byte(uint8_t data, uint8_t per_delay){
         "sbr %[port_val], (1 << %[MOSI]) \n\t"
       "out %[port_addr], %[port_val] \n\t"
       "lsl %[data] \n\t"
+
+      // for (i=0; i<8; i++)
+      "cpi %[bit_num], %[num_bits] \n\t"
+      "inc %[bit_num] \n\t"
+      "brcc end_spi_bit_loop \n\t"
 
       // delay for a bit
       "mov %[i], %[delay] \n\t"
@@ -264,4 +315,48 @@ uint8_t read_write_spi_byte(uint8_t data, uint8_t per_delay){
   );
 
   return byte_read;
+}
+
+
+// returns -1 on fail
+int8_t get_gpio_info(uint8_t gpio_num,
+                     volatile uint8_t** port_num,
+                     volatile uint8_t** gpio_ddr,
+                     volatile uint8_t* pin_num){
+  int8_t ret = 0;
+  switch (gpio_num){
+    case 0:
+      *pin_num = 6;
+      *port_num = &PORTA;
+      *gpio_ddr = &DDRA;
+      break;
+    case 1:
+      *pin_num = 7;
+      *port_num = &PORTA;
+      *gpio_ddr = &DDRA;
+      break;
+    case 2:
+      *pin_num = 0;
+      *port_num = &PORTB;
+      *gpio_ddr = &DDRB;
+      break;
+    case 3:
+      *pin_num = 1;
+      *port_num = &PORTB;
+      *gpio_ddr = &DDRB;
+      break;
+    case 4:
+      *pin_num = 2;
+      *port_num = &PORTB;
+      *gpio_ddr = &DDRB;
+      break;
+    case 5:           // reset
+      *pin_num = 5;
+      *port_num = &PORTA;
+      *gpio_ddr = &DDRA;
+      break;
+    default:
+      ret = -1;
+  }
+  return ret;
 }

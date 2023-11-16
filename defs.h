@@ -1,3 +1,5 @@
+#define MAX_PACKET_LEN 67
+
 // pids
 #define ACK_PID 0x2d
 #define NAK_PID 0xa5
@@ -6,6 +8,8 @@
 #define CONFIG_PGMR_PID 0x4d
   #define SET_SPI_RATE_PID 0x01
   #define READ_SPI_PID 0x02
+
+#define GET_PGMR_STATUS_PID 0x23
 
 #define CONFIG_DUT_PID 0x42
   #define SET_DD_PID 0x1a
