@@ -199,3 +199,31 @@ class Prog:
                data_line = fp.readline()
        self._utils.enable_programming(False)
        return all_match
+
+
+    def read_fuse_bits(self):
+        self.ser.flushInput()
+        self._utils.and_read_spi(True)
+        if self._utils.enable_programming(True):
+            data = self._utils.send_passthrough(b'\x58\x00\x00\x00', True)
+            print(f"lock bits: {hex(data[3])}")
+            data = self._utils.send_passthrough(b'\x50\x00\x00\x00', True)
+            print(f"fuse bits: {hex(data[3])}")
+            data = self._utils.send_passthrough(b'\x58\x08\x00\x00', True)
+            print(f"fuse high bits: {hex(data[3])}")
+            data = self._utils.send_passthrough(b'\x50\x08\x00\x00', True)
+            print(f"fuse extended bits: {hex(data[3])}")
+            data = self._utils.send_passthrough(b'\x38\x00\x00\x00', True)
+            print(f"calibration bits: {hex(data[3])}")
+            self._utils.enable_programming(False)
+        else:
+            assert False, "sorry friend failed to enable programming"
+
+
+    def write_fuse_bits(self, byte_in: bytes):
+        self.ser.flushInput()
+        if self._utils.enable_programming(True):
+            data = self._utils.send_passthrough(b'\xac\xa0\x00' + byte_in, True)
+
+        else:
+            assert False, "sorry friend failed to enable programming"
